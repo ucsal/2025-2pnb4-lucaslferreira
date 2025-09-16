@@ -16,10 +16,9 @@ import java.util.List;
 
 class DrawingPanel extends JPanel {
 
-    private static final long serialVersionUID = 1L;
-    private static final int MIN_SIZE = 10;
-
     private final List<ColoredShape> shapes = new ArrayList<>();
+    private CommandManager cmdManager = new CommandManager();
+
     private Point startDrag = null;
     private Point endDrag = null;
 
@@ -30,6 +29,7 @@ class DrawingPanel extends JPanel {
     private Color currentColor = new Color(30,144,255);
 
     private static final int GRID_SIZE = 20;
+    private static final int MIN_SIZE = 10;
 
     DrawingPanel() {
         setBackground(Color.WHITE);
@@ -74,25 +74,13 @@ class DrawingPanel extends JPanel {
                 } else if (startDrag != null && endDrag != null) {
                     Shape s = makeEllipse(startDrag, endDrag);
                     if (s != null) {
-                        shapes.add(new ColoredShape(s, currentColor));
+                        ColoredShape cs = new ColoredShape(s, currentColor);
+                        cmdManager.executeCommand(new AddShapeCommand(DrawingPanel.this, cs));
                     }
                 }
                 startDrag = null;
                 endDrag = null;
                 repaint();
-            }
-
-            @Override public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 1) {
-                    Point p = e.getPoint();
-                    int idx = findTopmostShapeIndex(p);
-                    if (idx != -1) {
-                        selectedIndex = idx;
-                    } else {
-                        selectedIndex = -1;
-                    }
-                    repaint();
-                }
             }
         };
 
@@ -111,24 +99,20 @@ class DrawingPanel extends JPanel {
         if (index < 0 || index >= shapes.size()) return;
         ColoredShape cs = shapes.get(index);
         Shape s = cs.shape;
-        Rectangle bounds = s.getBounds();
-        int w = bounds.width;
-        int h = bounds.height;
+        Rectangle oldBounds = s.getBounds();
+
+        int w = oldBounds.width;
+        int h = oldBounds.height;
         int newX = mousePt.x - (dragOffset != null ? dragOffset.x : w / 2);
         int newY = mousePt.y - (dragOffset != null ? dragOffset.y : h / 2);
 
         newX = Math.round(newX / (float)GRID_SIZE) * GRID_SIZE;
         newY = Math.round(newY / (float)GRID_SIZE) * GRID_SIZE;
 
-        if (s instanceof Ellipse2D.Double) {
-            Ellipse2D.Double e = (Ellipse2D.Double) s;
-            e.setFrame(newX, newY, w, h);
-        } else if (s instanceof Rectangle2D.Double) {
-            Rectangle2D.Double r = (Rectangle2D.Double) s;
-            r.setFrame(newX, newY, w, h);
-        } else {
-            shapes.set(index, new ColoredShape(new Ellipse2D.Double(newX, newY, w, h), cs.color));
-        }
+        Rectangle newBounds = new Rectangle(newX, newY, w, h);
+
+        cmdManager.executeCommand(new MoveShapeCommand(cs, oldBounds, newBounds));
+        repaint();
     }
 
     private Shape makeEllipse(Point p1, Point p2) {
@@ -139,20 +123,39 @@ class DrawingPanel extends JPanel {
         return new Ellipse2D.Double(x, y, w, h);
     }
 
-    void clear() {
-        shapes.clear();
-        selectedIndex = -1;
+    void addShapeInternal(ColoredShape cs) {
+        shapes.add(cs);
         repaint();
     }
 
-    private static class ColoredShape {
-        Shape shape;
-        Color color;
-        ColoredShape(Shape s, Color c) { this.shape = s; this.color = c; }
+    void removeShapeInternal(ColoredShape cs) {
+        shapes.remove(cs);
+        repaint();
     }
 
-    public Color getCurrentColor() { return currentColor; }
-    public void setCurrentColor(Color c) { this.currentColor = c; }
+    List<ColoredShape> getShapes() {
+        return shapes;
+    }
+
+    public void undo() { cmdManager.undo(); repaint(); }
+    public void redo() { cmdManager.redo(); repaint(); }
+    
+    public Color getCurrentColor() {
+        return currentColor;
+    }
+
+    public void setCurrentColor(Color c) {
+        this.currentColor = c;
+    }
+
+    public void exportToPNG(File file) throws IOException {
+        Utils.exportToPNG(this, file);
+    }
+
+    public void exportToSVG(File file) throws IOException {
+        Utils.exportToSVG(this, file);
+    }
+
 
     @Override protected void paintComponent(Graphics g) {
         super.paintComponent(g);
@@ -166,15 +169,6 @@ class DrawingPanel extends JPanel {
             g2.setColor(new Color(0,0,0,120));
             g2.setStroke(new BasicStroke(1.2f));
             g2.draw(cs.shape);
-            if (i == selectedIndex) {
-                Stroke old = g2.getStroke();
-                float[] dash = {6f, 4f};
-                g2.setStroke(new BasicStroke(2f, BasicStroke.CAP_BUTT,
-                                             BasicStroke.JOIN_BEVEL, 0, dash, 0));
-                g2.setColor(Color.BLACK);
-                g2.draw(cs.shape);
-                g2.setStroke(old);
-            }
         }
 
         if (startDrag != null && endDrag != null && !draggingShape) {
@@ -187,43 +181,5 @@ class DrawingPanel extends JPanel {
         }
 
         g2.dispose();
-    }
-
-    void exportToPNG(File file) throws IOException {
-        BufferedImage img = new BufferedImage(getWidth(), getHeight(), BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g2 = img.createGraphics();
-        paint(g2);
-        g2.dispose();
-        ImageIO.write(img, "png", file);
-    }
-
-    void exportToSVG(File file) throws IOException {
-        try (FileWriter writer = new FileWriter(file)) {
-            writer.write("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
-            writer.write("<svg xmlns=\"http://www.w3.org/2000/svg\" " +
-                         "width=\"" + getWidth() + "\" height=\"" + getHeight() + "\">\n");
-            for (int i = 0; i < shapes.size(); i++) {
-                ColoredShape cs = shapes.get(i);
-                if (cs.shape instanceof Ellipse2D.Double) {
-                    Ellipse2D.Double e = (Ellipse2D.Double) cs.shape;
-                    writer.write(String.format(
-                        "<ellipse cx=\"%f\" cy=\"%f\" rx=\"%f\" ry=\"%f\" fill=\"%s\" stroke=\"black\" stroke-width=\"1\" />\n",
-                        e.getCenterX(), e.getCenterY(),
-                        e.width / 2, e.height / 2,
-                        toHex(cs.color)));
-                } else if (cs.shape instanceof Rectangle2D.Double) {
-                    Rectangle2D.Double r = (Rectangle2D.Double) cs.shape;
-                    writer.write(String.format(
-                        "<rect x=\"%f\" y=\"%f\" width=\"%f\" height=\"%f\" fill=\"%s\" stroke=\"black\" stroke-width=\"1\" />\n",
-                        r.x, r.y, r.width, r.height,
-                        toHex(cs.color)));
-                }
-            }
-            writer.write("</svg>");
-        }
-    }
-
-    private String toHex(Color c) {
-        return String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue());
     }
 }
